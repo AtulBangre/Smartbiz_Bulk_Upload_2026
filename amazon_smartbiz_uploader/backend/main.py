@@ -30,14 +30,13 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     try:
-        existing = await admin_collection.find_one({"username": "admin"})
-        if not existing:
-            hashed = get_password_hash("adminpassword123")
-            await admin_collection.insert_one({
-                "username": "admin",
-                "hashed_password": hashed
-            })
-            print("Default admin created successfully.")
+        hashed = get_password_hash("adminpassword123")
+        await admin_collection.update_one(
+            {"username": "admin"},
+            {"$set": {"username": "admin", "hashed_password": hashed}},
+            upsert=True
+        )
+        print("Default admin account successfully initialized/reset.")
     except Exception as e:
         print(f"Startup admin init warning: {e}")
 
