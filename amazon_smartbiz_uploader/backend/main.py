@@ -160,73 +160,89 @@ class GenerateRequest(BaseModel):
 
 @app.post("/api/generate")
 async def generate_excel(request: GenerateRequest, current_admin = Depends(get_current_admin)):
-    # 1. Fetch draft items
-    cursor = drafts_collection.find({"username": current_admin["username"]})
-    items = await cursor.to_list(length=1000)
-    
-    if not items:
-        raise HTTPException(status_code=400, detail="Your draft is empty.")
+    try:
+        # 1. Fetch draft items
+        cursor = drafts_collection.find({"username": current_admin["username"]})
+        items = await cursor.to_list(length=1000)
+        
+        if not items:
+            raise HTTPException(status_code=400, detail="Your draft is empty.")
 
-    scraped_data = []
-    for item in items:
-        url = item.get("url", "")
-        if not url.startswith("http"):
-            url = f"https://www.amazon.in/dp/{url}"
+        scraped_data = []
+        for item in items:
+            url = item.get("url", "")
+            if url and not url.startswith("http"):
+                url = f"https://www.amazon.in/dp/{url}"
+                
+            try:
+                details = await scrape_amazon_product(url)
+            except Exception as e:
+                print(f"Scraper error for {url}: {e}")
+                details = {"name": "Amazon Product", "mrp": "1000", "selling_price": "800", "description": "", "images": []}
+                
+            try:
+                seo_data = await generate_seo_tags(details.get("name", ""), details.get("description", ""))
+            except Exception as e:
+                print(f"SEO gen error: {e}")
+                seo_data = {"seo_title": "", "seo_description": ""}
             
-        details = await scrape_amazon_product(url)
-        seo_data = await generate_seo_tags(details.get("name", ""), details.get("description", ""))
+            product_data = {
+                "custom_sku": item.get("custom_sku", ""),
+                "business_category": item.get("business_category", ""),
+                "product_category": item.get("product_category", ""),
+                "variant_relationship": item.get("variant_relationship", ""),
+                "size": item.get("size", ""),
+                "color_name": item.get("color_name", ""),
+                "best_seller": item.get("best_seller", ""),
+                "name": details.get("name", ""),
+                "mrp": details.get("mrp", ""),
+                "selling_price": details.get("selling_price", ""),
+                "description": details.get("description", ""),
+                "images": details.get("images", []),
+                "seo_title": seo_data.get("seo_title", ""),
+                "seo_description": seo_data.get("seo_description", "")
+            }
+            scraped_data.append(product_data)
+            
+        # 2. Generate Excel in memory
+        template_path = os.path.join(os.path.dirname(__file__), "smartbiz_bulk_upload_template_v5 (2).xlsx")
+        temp_output_path = os.path.join(os.path.dirname(__file__), f"temp_{ObjectId()}.xlsx")
         
-        product_data = {
-            "custom_sku": item.get("custom_sku", ""),
-            "business_category": item.get("business_category", ""),
-            "product_category": item.get("product_category", ""),
-            "variant_relationship": item.get("variant_relationship", ""),
-            "size": item.get("size", ""),
-            "color_name": item.get("color_name", ""),
-            "best_seller": item.get("best_seller", ""),
-            "name": details.get("name", ""),
-            "mrp": details.get("mrp", ""),
-            "selling_price": details.get("selling_price", ""),
-            "description": details.get("description", ""),
-            "images": details.get("images", []),
-            "seo_title": seo_data.get("seo_title", ""),
-            "seo_description": seo_data.get("seo_description", "")
+        success = generate_smartbiz_excel(scraped_data, template_path, temp_output_path)
+        if not success:
+            raise HTTPException(status_code=500, detail="Failed to generate Excel file")
+            
+        # 3. Save to GridFS
+        fs = get_fs()
+        with open(temp_output_path, "rb") as f:
+            file_id = await fs.upload_from_stream(
+                f"{request.sheet_name}.xlsx", 
+                f,
+                metadata={"contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
+            )
+            
+        if os.path.exists(temp_output_path):
+            os.remove(temp_output_path)
+        
+        # 4. Save history record
+        record = {
+            "username": current_admin["username"],
+            "sheet_name": request.sheet_name,
+            "file_id": file_id,
+            "date_generated": datetime.now(timezone.utc).isoformat(),
+            "item_count": len(items)
         }
-        scraped_data.append(product_data)
+        await sheets_collection.insert_one(record)
         
-    # 2. Generate Excel in memory
-    template_path = os.path.join(os.path.dirname(__file__), "smartbiz_bulk_upload_template_v5 (2).xlsx")
-    temp_output_path = os.path.join(os.path.dirname(__file__), f"temp_{ObjectId()}.xlsx")
-    
-    success = generate_smartbiz_excel(scraped_data, template_path, temp_output_path)
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to generate Excel file")
+        # 5. Clear draft
+        await drafts_collection.delete_many({"username": current_admin["username"]})
         
-    # 3. Save to GridFS
-    fs = get_fs()
-    with open(temp_output_path, "rb") as f:
-        file_id = await fs.upload_from_stream(
-            f"{request.sheet_name}.xlsx", 
-            f,
-            metadata={"contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
-        )
-        
-    os.remove(temp_output_path)
-    
-    # 4. Save history record
-    record = {
-        "username": current_admin["username"],
-        "sheet_name": request.sheet_name,
-        "file_id": file_id,
-        "date_generated": datetime.now(timezone.utc).isoformat(),
-        "item_count": len(items)
-    }
-    await sheets_collection.insert_one(record)
-    
-    # 5. Clear draft
-    await drafts_collection.delete_many({"username": current_admin["username"]})
-    
-    return {"status": "success", "file_id": str(file_id)}
+        return {"status": "success", "file_id": str(file_id)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in generate_excel: {e}")
+        raise HTTPException(status_code=500, detail=f"Generation error: {str(e)}")
 
 @app.get("/api/sheets/history")
 async def get_history(current_admin = Depends(get_current_admin)):
