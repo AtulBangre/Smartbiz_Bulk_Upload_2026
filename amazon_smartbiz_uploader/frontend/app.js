@@ -1,4 +1,5 @@
-const API_BASE = 'http://localhost:8000/api';
+const apiBaseUrl = (typeof CONFIG !== 'undefined' && CONFIG.API_BASE_URL) ? CONFIG.API_BASE_URL : 'http://localhost:8000';
+const API_BASE = `${apiBaseUrl}/api`;
 
 // Auth Check
 const token = localStorage.getItem('access_token');
