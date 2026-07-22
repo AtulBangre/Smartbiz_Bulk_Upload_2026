@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from bson import ObjectId
 
 from database import admin_collection, drafts_collection, sheets_collection, get_fs
-from auth import verify_password, create_access_token, get_current_admin
+from auth import verify_password, create_access_token, get_current_admin, get_password_hash
 from upload_handler import process_draft_upload
 from scraper import scrape_amazon_product
 from seo_generator import generate_seo_tags
@@ -27,6 +27,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.on_event("startup")
+async def startup_event():
+    try:
+        existing = await admin_collection.find_one({"username": "admin"})
+        if not existing:
+            hashed = get_password_hash("adminpassword123")
+            await admin_collection.insert_one({
+                "username": "admin",
+                "hashed_password": hashed
+            })
+            print("Default admin created successfully.")
+    except Exception as e:
+        print(f"Startup admin init warning: {e}")
+
 # Helper to fix ObjectId serialization
 def serialize_doc(doc):
     if doc and "_id" in doc:
@@ -36,12 +50,18 @@ def serialize_doc(doc):
 # --- AUTH ROUTES ---
 @app.post("/api/login")
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    admin = await admin_collection.find_one({"username": form_data.username})
-    if not admin or not verify_password(form_data.password, admin["hashed_password"]):
-        raise HTTPException(status_code=400, detail="Incorrect username or password")
-        
-    access_token = create_access_token(data={"sub": admin["username"]})
-    return {"access_token": access_token, "token_type": "bearer"}
+    try:
+        admin = await admin_collection.find_one({"username": form_data.username})
+        if not admin or not verify_password(form_data.password, admin["hashed_password"]):
+            raise HTTPException(status_code=400, detail="Incorrect username or password")
+            
+        access_token = create_access_token(data={"sub": admin["username"]})
+        return {"access_token": access_token, "token_type": "bearer"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Login internal error: {e}")
+        raise HTTPException(status_code=500, detail=f"Database or Server Error: {str(e)}")
 
 # --- DRAFT ROUTES ---
 class DraftItemCreate(BaseModel):
